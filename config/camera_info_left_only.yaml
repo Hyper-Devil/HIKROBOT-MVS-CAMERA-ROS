@@ -1,0 +1,49 @@
+# Camera information for left camera only
+# Camera calibration parameters from XML calibration file
+
+camera_left:
+  # Image dimensions (from XML size tag)
+  image_width: 2048
+  image_height: 1536
+  
+  # Camera name
+  camera_name: "left_camera"
+  
+  # Camera matrix (3x3) - from XML M1 matrix
+  # [fx,  0, cx]
+  # [ 0, fy, cy]
+  # [ 0,  0,  1]
+  camera_matrix:
+    rows: 3
+    cols: 3
+    data: [1226.826244235890499, 0.054599369308207, 1035.765542636815780,
+           0.000000000000000, 1226.784934786660187, 735.264798789340603,
+           0.000000000000000, 0.000000000000000, 1.000000000000000]
+  
+  # Distortion coefficients (k1, k2, p1, p2, k3) - from XML D1 matrix
+  distortion_coefficients:
+    rows: 1
+    cols: 5
+    data: [-0.089345656385129, 0.095419224554585, 0.000000000000000, 0.000000000000000, 0.000000000000000]
+  
+  # Rectification matrix (3x3) - identity for single camera
+  rectification_matrix:
+    rows: 3
+    cols: 3
+    data: [1.0, 0.0, 0.0,
+           0.0, 1.0, 0.0,
+           0.0, 0.0, 1.0]
+  
+  # Projection matrix (3x4) - same as camera matrix for single camera
+  # [fx',  0, cx', Tx]
+  # [ 0, fy', cy', Ty]
+  # [ 0,   0,  1,   0]
+  projection_matrix:
+    rows: 3
+    cols: 4
+    data: [1226.826244235890499, 0.054599369308207, 1035.765542636815780, 0.0,
+           0.000000000000000, 1226.784934786660187, 735.264798789340603, 0.0,
+           0.000000000000000, 0.000000000000000, 1.000000000000000, 0.0]
+  
+  # Distortion model
+  distortion_model: "plumb_bob"

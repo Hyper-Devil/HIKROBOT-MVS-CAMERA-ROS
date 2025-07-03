@@ -1,0 +1,91 @@
+# Camera information for left and right cameras
+# Camera calibration parameters from XML calibration file
+
+camera_left:
+  # Image dimensions (from XML size tag)
+  image_width: 2048
+  image_height: 1536
+  
+  # Camera name
+  camera_name: "left_camera"
+  
+  # Camera matrix (3x3) - from XML M1 matrix
+  # [fx,  0, cx]
+  # [ 0, fy, cy]
+  # [ 0,  0,  1]
+  camera_matrix:
+    rows: 3
+    cols: 3
+    data: [1226.826244235890499, 0.054599369308207, 1035.765542636815780,
+           0.000000000000000, 1226.784934786660187, 735.264798789340603,
+           0.000000000000000, 0.000000000000000, 1.000000000000000]
+  
+  # Distortion coefficients (k1, k2, p1, p2, k3) - from XML D1 matrix
+  distortion_coefficients:
+    rows: 1
+    cols: 5
+    data: [-0.089345656385129, 0.095419224554585, 0.000000000000000, 0.000000000000000, 0.000000000000000]
+  
+  # Rectification matrix (3x3) - for stereo rectification
+  rectification_matrix:
+    rows: 3
+    cols: 3
+    data: [0.999960789005975, -0.000323555094195, 0.008849619350503,
+           0.000365035522165, 0.999988953818366, -0.004686042073716,
+           -0.008848005403216, 0.004689088754769, 0.999949861366576]
+  
+  # Projection matrix (3x4) - for stereo left camera
+  # [fx',  0, cx', Tx]
+  # [ 0, fy', cy', Ty]
+  # [ 0,   0,  1,   0]
+  projection_matrix:
+    rows: 3
+    cols: 4
+    data: [1226.826244235890499, 0.054599369308207, 1035.765542636815780, 0.0,
+           0.000000000000000, 1226.784934786660187, 735.264798789340603, 0.0,
+           0.000000000000000, 0.000000000000000, 1.000000000000000, 0.0]
+  
+  # Distortion model
+  distortion_model: "plumb_bob"
+
+camera_right:
+  # Image dimensions (from XML size tag)
+  image_width: 2048
+  image_height: 1536
+  
+  # Camera name
+  camera_name: "right_camera"
+  
+  # Camera matrix (3x3) - from XML M2 matrix
+  camera_matrix:
+    rows: 3
+    cols: 3
+    data: [1224.955194360940823, -0.350672492310975, 1015.253462174664151,
+           0.000000000000000, 1225.470558979229054, 786.007140767218289,
+           0.000000000000000, 0.000000000000000, 1.000000000000000]
+  
+  # Distortion coefficients (k1, k2, p1, p2, k3) - from XML D2 matrix
+  distortion_coefficients:
+    rows: 1
+    cols: 5
+    data: [-0.092651058319124, 0.102108026210783, 0.000000000000000, 0.000000000000000, 0.000000000000000]
+  
+  # Rectification matrix (3x3) - inverse of left camera rectification for stereo
+  rectification_matrix:
+    rows: 3
+    cols: 3
+    data: [0.999960789005975, 0.000365035522165, -0.008848005403216,
+           -0.000323555094195, 0.999988953818366, 0.004689088754769,
+           0.008849619350503, -0.004686042073716, 0.999949861366576]
+  
+  # Projection matrix (3x4) - for stereo right camera with baseline
+  # The Tx value should be -fx * baseline_x (baseline from T vector)
+  projection_matrix:
+    rows: 3
+    cols: 4
+    data: [1224.955194360940823, -0.350672492310975, 1015.253462174664151, -523734.4,
+           0.000000000000000, 1225.470558979229054, 786.007140767218289, -1.056,
+           0.000000000000000, 0.000000000000000, 1.000000000000000, 0.0]
+  
+  # Distortion model
+  distortion_model: "plumb_bob"

@@ -2,10 +2,11 @@
     <!-- Load camera configuration parameters -->
     <rosparam file="$(find hikrobot_camera)/config/camera.yaml" command="load"/>
     
-    <!-- Load camera info parameters (left camera only) -->
+    <!-- Load camera info parameters (this file currently defines one camera) -->
     <rosparam file="$(find hikrobot_camera)/config/camera_info_left_only.yaml" command="load"/>
     
     <!-- Camera node -->
-    <node pkg="hikrobot_camera" type="hikrobot_camera" name="hikrobot_camera" respawn="true" output="screen" /> 
+    <node pkg="hikrobot_camera" type="hikrobot_camera" name="hikrobot_camera" respawn="true" output="screen">
+    </node> 
 
 </launch>

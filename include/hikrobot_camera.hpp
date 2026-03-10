@@ -12,34 +12,43 @@
 #include "CameraParams.h"
 #include "MvCameraControl.h"
 #include <boost/make_shared.hpp> // Required for cv_bridge shared pointers
+#include <sstream>
+#include <algorithm>
+#include <iomanip>
+#include <vector>
+#include <set>
 
 namespace camera
 {
     std::vector<cv::Mat> frames;
     std::vector<bool> frame_emptys;
     std::vector<pthread_mutex_t> mutexs;
-    bool SysteamTime;
+    bool SystemTime;
 
-    // Camera availability flags
-    bool left_camera_available;
-    bool right_camera_available;
+    std::vector<int> camera_device_indices;
+    std::vector<std::string> camera_yaml_names;
+    std::vector<std::string> configured_camera_ips;
 
-    image_transport::CameraPublisher imageL_pub;
-    image_transport::CameraPublisher imageR_pub;
-    sensor_msgs::Image imageL_msg;
-    sensor_msgs::Image imageR_msg;
-    sensor_msgs::CameraInfo cameraL_info_msg;
-    sensor_msgs::CameraInfo cameraR_info_msg;
+    std::vector<image_transport::CameraPublisher> image_pubs;
+    std::vector<sensor_msgs::Image> image_msgs;
+    std::vector<sensor_msgs::CameraInfo> camera_info_msgs;
 
-    cv_bridge::CvImagePtr cv_ptr_l;
-    cv_bridge::CvImagePtr cv_ptr_r;
+    std::vector<cv_bridge::CvImagePtr> cv_ptrs;
 
     ros::Time ConvertToROSTime(uint32_t nDevTimeStampHigh, uint32_t nDevTimeStampLow);
+
+    static bool setEnumWithVerify(void* handle,
+                                  const char* key,
+                                  unsigned int desired_value,
+                                  const char* desired_name,
+                                  const char* fallback_name = NULL);
 
     struct ThreadData {
         int ndevice;
         void* handle;
         MVCC_INTVALUE stParam;
+        bool trigger_enabled;
+        int trigger_source;
     };
 
     class Camera
@@ -49,7 +58,7 @@ namespace camera
         ~Camera();
 
         bool PrintDeviceInfo(MV_CC_DEVICE_INFO *pstMVDevInfo);
-        void RunCamera(int ndevice, void* &handle); // 初始化和启动相机
+        void RunCamera(int logical_index, int physical_device_index, void* &handle); // 初始化和启动相机
         static void* WorkThread(void* p_handle); // 工作线程函数
 
     private:
@@ -59,10 +68,12 @@ namespace camera
 
         int nRet;
         int TriggerMode;
-        // 触发模式：MV_TRIGGER_SOURCE_LINE0 = 0,MV_TRIGGER_SOURCE_LINE1 = 1,MV_TRIGGER_SOURCE_LINE2 = 2,
+        int TriggerSource;
+        double FrameRate;
+        // 触发来源：
+        // MV_TRIGGER_SOURCE_LINE0 = 0,MV_TRIGGER_SOURCE_LINE1 = 1,MV_TRIGGER_SOURCE_LINE2 = 2,
         // MV_TRIGGER_SOURCE_LINE3 = 3,MV_TRIGGER_SOURCE_COUNTER0 = 4,MV_TRIGGER_SOURCE_SOFTWARE = 7,
         // MV_TRIGGER_SOURCE_FrequencyConverter = 8
-        int TriggerSource;
 
         // CameraInfoManager members (removed - now using ROS params directly)
         // boost::shared_ptr<camera_info_manager::CameraInfoManager> cinfo_manager_l_;
@@ -73,66 +84,103 @@ namespace camera
         
         // Helper function to check if camera parameters exist
         bool checkCameraParamsExist(ros::NodeHandle &node, const std::string &camera_name);
+
+        // Helper function to convert device IP to string
+        std::string ipToString(uint32_t raw_ip);
+
+        // Helper function to compare configured ip with device raw ip
+        bool ipMatches(const std::string &configured_ip, uint32_t device_raw_ip);
+
+        // Helper function to find device index by configured ip
+        int findDeviceIndexByIp(const std::string &configured_ip, std::vector<bool> &used_devices);
+
+        // Helper function to convert trigger source to string
+        std::string triggerSourceToString(unsigned int trigger_source);
+
+        // Discover camera names from ROS parameter server
+        std::vector<std::string> discoverCameraNames(ros::NodeHandle &node);
+
+        // Helper function to print current device configuration once after startup
+        void logCurrentConfig(int logical_index, int physical_device_index, const std::string &yaml_camera_name, void* handle);
     };
+
+    static bool setEnumWithVerify(void* handle,
+                                  const char* key,
+                                  unsigned int desired_value,
+                                  const char* desired_name,
+                                  const char* fallback_name)
+    {
+        int ret = MV_OK;
+
+        // Try setting by desired name first
+        if (desired_name != NULL)
+        {
+            ret = MV_CC_SetEnumValueByString(handle, key, desired_name);
+            if (ret == MV_OK)
+            {
+                // Verify if it was set successfully
+                MVCC_ENUMVALUE current = {0};
+                ret = MV_CC_GetEnumValue(handle, key, &current);
+                if (ret == MV_OK)
+                {
+                    return true;
+                }
+            }
+        }
+
+        // Try setting by fallback name
+        if (fallback_name != NULL)
+        {
+            ret = MV_CC_SetEnumValueByString(handle, key, fallback_name);
+            if (ret == MV_OK)
+            {
+                MVCC_ENUMVALUE current = {0};
+                ret = MV_CC_GetEnumValue(handle, key, &current);
+                if (ret == MV_OK)
+                {
+                    return true;
+                }
+            }
+        }
+
+        // Try setting by desired value as last resort
+        ret = MV_CC_SetEnumValue(handle, key, desired_value);
+        if (ret == MV_OK)
+        {
+            MVCC_ENUMVALUE current = {0};
+            ret = MV_CC_GetEnumValue(handle, key, &current);
+            if (ret == MV_OK && current.nCurValue == desired_value)
+            {
+                return true;
+            }
+        }
+
+        ROS_ERROR("Set %s failed using name(%s), fallback(%s) or value(%u)", 
+                  key, desired_name ? desired_name : "none", 
+                  fallback_name ? fallback_name : "none", desired_value);
+        return false;
+    }
 
     Camera::Camera(ros::NodeHandle &node)
     {
         //读取待设置的摄像头参数 第三个参数是默认值 yaml文件未给出该值时生效
         node.param("TriggerMode", TriggerMode, 0);    //0为不启用触发，1为启用
         node.param("TriggerSource", TriggerSource, 0);  //设置触发模式
-        node.param("SysteamTime", SysteamTime, false);
+        node.param("FrameRate", FrameRate, 10.0);       //无触发时的帧率
+        node.param("SystemTime", SystemTime, false);
 
-        // Load camera info from ROS parameters
         ROS_INFO("Loading camera info from ROS parameters...");
-        
-        // Check which cameras are available
-        left_camera_available = checkCameraParamsExist(node, "camera_left");
-        right_camera_available = checkCameraParamsExist(node, "camera_right");
-        
-        if (!left_camera_available && !right_camera_available)
+        std::vector<std::string> discovered_camera_names = discoverCameraNames(node);
+        if (discovered_camera_names.empty())
         {
-            ROS_ERROR("No camera parameters found in ROS parameter server!");
+            ROS_ERROR("No valid camera parameters found in ROS parameter server!");
             exit(-1);
         }
-        
-        // Load camera info only for available cameras
-        if (left_camera_available)
-        {
-            loadCameraInfoFromParams(node, "camera_left", cameraL_info_msg);
-            ROS_INFO("Left camera parameters loaded successfully");
-        }
-        else
-        {
-            ROS_WARN("Left camera parameters not found, left camera will be disabled");
-        }
-        
-        if (right_camera_available)
-        {
-            loadCameraInfoFromParams(node, "camera_right", cameraR_info_msg);
-            ROS_INFO("Right camera parameters loaded successfully");
-        }
-        else
-        {
-            ROS_WARN("Right camera parameters not found, right camera will be disabled");
-        }
+
+        int configured_camera_count = static_cast<int>(discovered_camera_names.size());
 
         image_transport::ImageTransport main_cam_image(node);
         
-        // Create publishers only for available cameras
-        if (left_camera_available)
-        {
-            imageL_pub = main_cam_image.advertiseCamera("/hikrobot_camera_L/image_raw", 1000);
-            cv_ptr_l = boost::make_shared<cv_bridge::CvImage>();
-            cv_ptr_l->encoding = sensor_msgs::image_encodings::RGB8;
-        }
-        
-        if (right_camera_available)
-        {
-            imageR_pub = main_cam_image.advertiseCamera("/hikrobot_camera_R/image_raw", 1000);
-            cv_ptr_r = boost::make_shared<cv_bridge::CvImage>();
-            cv_ptr_r->encoding = sensor_msgs::image_encodings::RGB8;
-        }
-
         // 枚举设备
         memset(&stDeviceList, 0, sizeof(MV_CC_DEVICE_INFO_LIST));
         nRet = MV_CC_EnumDevices(MV_GIGE_DEVICE | MV_USB_DEVICE, &stDeviceList);
@@ -144,6 +192,14 @@ namespace camera
         unsigned int nIndex = 0;
         if (stDeviceList.nDeviceNum > 0)
         {
+            if (static_cast<int>(stDeviceList.nDeviceNum) != configured_camera_count)
+            {
+                ROS_ERROR("Configured %d camera(s) in YAML but found %d device(s). Strict matching requires exact equality.",
+                          configured_camera_count, stDeviceList.nDeviceNum);
+                exit(-1);
+            }
+
+            int active_device_count = configured_camera_count;
             for (int i = 0; i < stDeviceList.nDeviceNum; i++)
             {
                 printf("[device %d]:\n", i);
@@ -153,21 +209,69 @@ namespace camera
                     break;
                 }
                 PrintDeviceInfo(pDeviceInfo);
-
-                void* handle = NULL;
-                handles.push_back(handle);
-
-                pthread_mutex_t mutex;
-                pthread_mutex_init(&mutex, NULL);  // 初始化互斥锁
-                mutexs.push_back(mutex);
-
-                cv::Mat frame;
-                frames.push_back(frame);
-
-                bool frame_empty = 0;
-                frame_emptys.push_back(frame_empty);
             }
             printf("Find Devices: %d\n", stDeviceList.nDeviceNum);
+
+            handles.clear();
+            mutexs.clear();
+            frames.clear();
+            frame_emptys.clear();
+
+            handles.resize(active_device_count, NULL);
+            mutexs.resize(active_device_count);
+            frames.resize(active_device_count);
+            frame_emptys.resize(active_device_count, false);
+            camera_device_indices.resize(active_device_count, -1);
+            camera_yaml_names.resize(active_device_count);
+            configured_camera_ips.resize(active_device_count);
+            image_pubs.resize(active_device_count);
+            image_msgs.resize(active_device_count);
+            camera_info_msgs.resize(active_device_count);
+            cv_ptrs.resize(active_device_count);
+
+            for (int i = 0; i < active_device_count; i++)
+            {
+                pthread_mutex_init(&mutexs[i], NULL);  // 初始化互斥锁
+            }
+
+            std::vector<bool> used_devices(stDeviceList.nDeviceNum, false);
+            for (int logical_index = 0; logical_index < active_device_count; ++logical_index)
+            {
+                const std::string &camera_name = discovered_camera_names[logical_index];
+                std::string configured_ip;
+                if (!node.getParam(camera_name + "/ip", configured_ip) || configured_ip.empty())
+                {
+                    ROS_ERROR("%s/ip is required and must not be empty", camera_name.c_str());
+                    exit(-1);
+                }
+
+                int matched_index = findDeviceIndexByIp(configured_ip, used_devices);
+                if (matched_index < 0)
+                {
+                    ROS_ERROR("Failed to match %s with configured ip %s", camera_name.c_str(), configured_ip.c_str());
+                    exit(-1);
+                }
+
+                camera_device_indices[logical_index] = matched_index;
+                camera_yaml_names[logical_index] = camera_name;
+                configured_camera_ips[logical_index] = configured_ip;
+                used_devices[matched_index] = true;
+                ROS_INFO("%s matched to device index %d", camera_name.c_str(), matched_index);
+            }
+
+            for (int i = 0; i < active_device_count; ++i)
+            {
+                const std::string &camera_name = camera_yaml_names[i];
+                std::string topic = "/hikrobot_camera/" + camera_name + "/image_raw";
+                image_pubs[i] = main_cam_image.advertiseCamera(topic, 1000);
+
+                cv_ptrs[i] = boost::make_shared<cv_bridge::CvImage>();
+                cv_ptrs[i]->encoding = sensor_msgs::image_encodings::RGB8;
+
+                loadCameraInfoFromParams(node, camera_name, camera_info_msgs[i]);
+
+                ROS_INFO("Initialized publisher for %s on topic %s", camera_name.c_str(), topic.c_str());
+            }
         }
         else
         {
@@ -176,17 +280,23 @@ namespace camera
         }
 
         // 选择设备初始设置并取流
-        for (int i = 0; i < stDeviceList.nDeviceNum; i++)
+        for (int i = 0; i < static_cast<int>(handles.size()); i++)
         {
-            RunCamera(i, handles[i]);
+            RunCamera(i, camera_device_indices[i], handles[i]);
         }
     }
 
     // 初始化和启动相机
-    void Camera::RunCamera(int ndevice, void* &handle)
+    void Camera::RunCamera(int logical_index, int physical_device_index, void* &handle)
     {
+        if (physical_device_index < 0 || physical_device_index >= static_cast<int>(stDeviceList.nDeviceNum))
+        {
+            ROS_ERROR("Invalid physical_device_index: %d", physical_device_index);
+            exit(-1);
+        }
+
         //选择设备并创建句柄
-        nRet = MV_CC_CreateHandle(&handle, stDeviceList.pDeviceInfo[ndevice]);
+        nRet = MV_CC_CreateHandle(&handle, stDeviceList.pDeviceInfo[physical_device_index]);
 
         if (MV_OK != nRet)
         {
@@ -204,7 +314,7 @@ namespace camera
         }
 
         // ch:探测网络最佳包大小(只对GigE相机有效) | en:Detection network optimal package size(It only works for the GigE camera)
-        if (stDeviceList.pDeviceInfo[ndevice]->nTLayerType == MV_GIGE_DEVICE)
+        if (stDeviceList.pDeviceInfo[physical_device_index]->nTLayerType == MV_GIGE_DEVICE)
         {
             int nPacketSize = MV_CC_GetOptimalPacketSize(handle);
             if (nPacketSize > 0)
@@ -221,23 +331,53 @@ namespace camera
             }
         }
 
-        // // 设置触发模式为off
-        // nRet = MV_CC_SetEnumValue(handle, "TriggerMode", TriggerMode);
-        // if (MV_OK != nRet)
-        // {
-        //     printf("MV_CC_SetTriggerMode fail! nRet [%x]\n", nRet);
-        //     exit(-1);
-        // }
+        const unsigned int desired_trigger_mode = (TriggerMode != 0) ? 1U : 0U;
+        const char* desired_mode_name = (desired_trigger_mode == 1U) ? "On" : "Off";
+        const char* fallback_mode_name = (desired_trigger_mode == 1U) ? "ON" : "OFF";
+        
+        // 1. 先设置 TriggerMode，这通常是解锁其他触发选项的前提
+        if (!setEnumWithVerify(handle, "TriggerMode", desired_trigger_mode, desired_mode_name, fallback_mode_name))
+        {
+            ROS_ERROR("Failed to set TriggerMode=%d", TriggerMode);
+            exit(-1);
+        }
 
-        // if(TriggerMode){
-        //     // 设置触发源
-        //     nRet = MV_CC_SetEnumValue(handle, "TriggerSource", TriggerSource);
-        //     if (MV_OK != nRet)
-        //     {
-        //         printf("MV_CC_SetTriggerSource fail! nRet [%x]\n", nRet);
-        //         exit(-1);
-        //     }
-        // }
+        if (TriggerMode)
+        {
+            // 设置 TriggerSource (触发源，例如 Line0)
+            if (!setEnumWithVerify(handle,
+                                   "TriggerSource",
+                                   static_cast<unsigned int>(TriggerSource),
+                                   triggerSourceToString(static_cast<unsigned int>(TriggerSource)).c_str(), 
+                                   NULL))
+            {
+                ROS_ERROR("Failed to set TriggerSource=%d", TriggerSource);
+                exit(-1);
+            }
+        }
+        else
+        {
+            // TriggerMode == 0 (连续采图模式) 时，通过设置帧率控制获取帧率
+            // MVS客户端中叫 Acquisition Frame Rate Control Enable 或 Acquisition Frame Rate Enable
+            int ret_enable = MV_CC_SetBoolValue(handle, "AcquisitionFrameRateControlEnable", true);
+            if (ret_enable != MV_OK) {
+                ret_enable = MV_CC_SetBoolValue(handle, "AcquisitionFrameRateEnable", true);
+                if (ret_enable != MV_OK) {
+                    ROS_WARN("Failed to enable AcquisitionFrameRate Control.");
+                } else {
+                    ROS_INFO("Enabled AcquisitionFrameRateEnable via fallback name.");
+                }
+            } else {
+                ROS_INFO("Enabled AcquisitionFrameRateControlEnable.");
+            }
+
+            int ret_fps = MV_CC_SetFloatValue(handle, "AcquisitionFrameRate", FrameRate);
+            if (ret_fps != MV_OK) {
+                ROS_WARN("Failed to set AcquisitionFrameRate to %f", FrameRate);
+            } else {
+                ROS_INFO("Set AcquisitionFrameRate to %f", FrameRate);
+            }
+        }
 
         // ch:获取数据包大小 | en:Get payload size
         MVCC_INTVALUE stParam;
@@ -257,15 +397,25 @@ namespace camera
             exit(-1);
         }
 
+        // 输出一次当前生效配置（帧率、分辨率、触发模式等）
+        std::string yaml_camera_name = "unknown_camera";
+        if (logical_index >= 0 && logical_index < static_cast<int>(camera_yaml_names.size()) && !camera_yaml_names[logical_index].empty())
+        {
+            yaml_camera_name = camera_yaml_names[logical_index];
+        }
+        logCurrentConfig(logical_index, physical_device_index, yaml_camera_name, handle);
+
         // 创建工作线程
         ThreadData* data = new ThreadData;
-        data->ndevice = ndevice;
+        data->ndevice = logical_index;
         data->handle = handle;
         data->stParam = stParam;
+        data->trigger_enabled = (TriggerMode != 0);
+        data->trigger_source = TriggerSource;
 
         pthread_t nThreadID;
         threads.push_back(nThreadID);
-        nRet = pthread_create(&threads[ndevice], NULL, WorkThread, static_cast<void*>(data));
+        nRet = pthread_create(&threads[logical_index], NULL, WorkThread, static_cast<void*>(data));
         if (nRet != 0)
         {
             printf("thread create failed. ret = %d\n", nRet);
@@ -279,12 +429,15 @@ namespace camera
         int nRet;
         int image_empty_count = 0; //空图帧数
         unsigned char *pDataForRGB = NULL;
+        unsigned int nDataSizeForRGB = 0;
         MV_CC_PIXEL_CONVERT_PARAM stConvertParam = {0};
 
         ThreadData* data = static_cast<ThreadData*>(p_handle);
         int ndevice = data->ndevice;
         void* handle = data->handle;
         MVCC_INTVALUE stParam = data->stParam;
+        bool trigger_enabled = data->trigger_enabled;
+        int trigger_source = data->trigger_source;
 
         unsigned char * pData = NULL; 
         MV_FRAME_OUT_INFO_EX stImageInfo = {0};
@@ -304,10 +457,25 @@ namespace camera
             nRet = MV_CC_GetOneFrameTimeout(handle, pData, nDataSize, &stImageInfo, 15);
             if (nRet != MV_OK)
             {
+                if (trigger_enabled && nRet == MV_E_NODATA)
+                {
+                    ++image_empty_count;
+                    ROS_WARN_THROTTLE(5.0,
+                                      "Device %d in trigger mode (source=%d), waiting for trigger signal. Consecutive empty reads: %d",
+                                      ndevice,
+                                      trigger_source,
+                                      image_empty_count);
+                    continue;
+                }
+
                 if (++image_empty_count > 100)
                 {
                     ROS_INFO("The Number of Faild Reading Exceed The Set Value!\n");
                     // Clean up before exiting
+                    if (pDataForRGB != NULL)
+                    {
+                        free(pDataForRGB);
+                    }
                     free(pData);
                     delete static_cast<ThreadData*>(p_handle);
                     exit(-1);
@@ -316,14 +484,25 @@ namespace camera
             }
             image_empty_count = 0; //空图帧数
 
-            pDataForRGB = (unsigned char*)malloc(stImageInfo.nWidth * stImageInfo.nHeight * 4 + 2048);
-            if (NULL == pDataForRGB)
+            unsigned int requiredRgbBufferSize = stImageInfo.nWidth * stImageInfo.nHeight * 4 + 2048;
+            if (pDataForRGB == NULL || nDataSizeForRGB < requiredRgbBufferSize)
             {
-                printf("pDataForRGB is null\n");
-                free(pData);  // 释放pData
-                // Clean up before exiting
-                delete static_cast<ThreadData*>(p_handle);
-                exit(-1);
+                if (pDataForRGB != NULL)
+                {
+                    free(pDataForRGB);
+                    pDataForRGB = NULL;
+                }
+
+                pDataForRGB = (unsigned char*)malloc(requiredRgbBufferSize);
+                if (NULL == pDataForRGB)
+                {
+                    printf("pDataForRGB is null\n");
+                    free(pData);  // 释放pData
+                    // Clean up before exiting
+                    delete static_cast<ThreadData*>(p_handle);
+                    exit(-1);
+                }
+                nDataSizeForRGB = requiredRgbBufferSize;
             }
 
             // 像素格式转换
@@ -336,7 +515,7 @@ namespace camera
             stConvertParam.enSrcPixelType = stImageInfo.enPixelType;
             stConvertParam.enDstPixelType = PixelType_Gvsp_RGB8_Packed;
             stConvertParam.pDstBuffer = pDataForRGB;
-            stConvertParam.nDstBufferSize = stImageInfo.nWidth * stImageInfo.nHeight *  4 + 2048;
+            stConvertParam.nDstBufferSize = nDataSizeForRGB;
             nRet = MV_CC_ConvertPixelType(handle, &stConvertParam);
             if (MV_OK != nRet)
             {
@@ -348,58 +527,41 @@ namespace camera
                 exit(-1);
             }
             pthread_mutex_lock(&mutexs[ndevice]);
-            if(ndevice == 0 && left_camera_available){
-                cv_ptr_l->image = cv::Mat(stImageInfo.nHeight, stImageInfo.nWidth, CV_8UC3, pDataForRGB).clone();
-                imageL_msg = *(cv_ptr_l->toImageMsg());
-                if(SysteamTime)
+            if (ndevice >= 0 &&
+                ndevice < static_cast<int>(cv_ptrs.size()) &&
+                ndevice < static_cast<int>(image_msgs.size()) &&
+                ndevice < static_cast<int>(camera_info_msgs.size()) &&
+                ndevice < static_cast<int>(camera_yaml_names.size()))
+            {
+                const std::string &camera_name = camera_yaml_names[ndevice];
+                cv_ptrs[ndevice]->image = cv::Mat(stImageInfo.nHeight, stImageInfo.nWidth, CV_8UC3, pDataForRGB);
+                image_msgs[ndevice] = *(cv_ptrs[ndevice]->toImageMsg());
+
+                if (SystemTime)
                 {
-                    imageL_msg.header.stamp = ros::Time::now(); 
-                    // ROS_INFO("Using cameraL system time: %f", imageR_msg.header.stamp.toSec());
+                    image_msgs[ndevice].header.stamp = ros::Time::now();
                 }
                 else
                 {
-                    imageL_msg.header.stamp = ConvertToROSTime(stImageInfo.nDevTimeStampHigh, stImageInfo.nDevTimeStampLow);
-                    // ROS_INFO("Using cameraL time: %f", imageL_msg.header.stamp.toSec()); // Reduced verbosity
+                    image_msgs[ndevice].header.stamp = ConvertToROSTime(stImageInfo.nDevTimeStampHigh, stImageInfo.nDevTimeStampLow);
                 }
-                imageL_msg.header.frame_id = "hikrobot_camera"; // Or a more specific frame like "camera_left_link"
-                
-                // cameraL_info_msg is already populated with calibration data by loadCameraInfoFromParams
-                // We only need to update the header stamp and frame_id to match the image message
-                cameraL_info_msg.header.stamp = imageL_msg.header.stamp;
-                cameraL_info_msg.header.frame_id = imageL_msg.header.frame_id; 
 
-                imageL_pub.publish(imageL_msg, cameraL_info_msg);
-            }
-            else if(ndevice == 1 && right_camera_available){
-                cv_ptr_r->image = cv::Mat(stImageInfo.nHeight, stImageInfo.nWidth, CV_8UC3, pDataForRGB).clone();
-                imageR_msg = *(cv_ptr_r->toImageMsg());
-                if(SysteamTime)
-                {
-                    imageR_msg.header.stamp = ros::Time::now(); 
-                    // ROS_INFO("Using cameraR system time: %f", imageR_msg.header.stamp.toSec());
-                }
-                else
-                {
-                    imageR_msg.header.stamp = ConvertToROSTime(stImageInfo.nDevTimeStampHigh, stImageInfo.nDevTimeStampLow);
-                    // ROS_INFO("Using cameraR time: %f", imageR_msg.header.stamp.toSec()); // Reduced verbosity
-                }
-                imageR_msg.header.frame_id = "hikrobot_camera"; // Or a more specific frame like "camera_right_link"
+                image_msgs[ndevice].header.frame_id = camera_name;
+                camera_info_msgs[ndevice].header.stamp = image_msgs[ndevice].header.stamp;
+                camera_info_msgs[ndevice].header.frame_id = camera_name;
 
-                // cameraR_info_msg is already populated with calibration data by loadCameraInfoFromParams
-                // We only need to update the header stamp and frame_id to match the image message
-                cameraR_info_msg.header.stamp = imageR_msg.header.stamp; // Match right image stamp
-                cameraR_info_msg.header.frame_id = imageR_msg.header.frame_id;
-
-                imageR_pub.publish(imageR_msg, cameraR_info_msg);
+                image_pubs[ndevice].publish(image_msgs[ndevice], camera_info_msgs[ndevice]);
             }
-            else if(ndevice >= 2){
-                printf("目前只支持两个相机，多个相机需要在此处添加一些代码。");
-                exit(-1);
+            else
+            {
+                ROS_WARN_THROTTLE(5.0, "Device %d has no valid camera publish mapping, frame skipped.", ndevice);
             }
-            // If camera is not available, skip processing but continue loop
             pthread_mutex_unlock(&mutexs[ndevice]);
+        }
 
-            free(pDataForRGB);  // 释放pDataForRGB
+        if (pDataForRGB != NULL)
+        {
+            free(pDataForRGB);
         }
         free(pData);
         delete data;  // 释放data
@@ -432,9 +594,187 @@ namespace camera
     ros::Time ConvertToROSTime(uint32_t nDevTimeStampHigh, uint32_t nDevTimeStampLow)
     {
         uint64_t timestamp = static_cast<uint64_t>(nDevTimeStampHigh) << 32 | nDevTimeStampLow;
+        // 设备的系统时间戳是以10ns为单位（通常频率为100MHz，即每秒10^8 ticks）
+        timestamp *= 10; 
         uint64_t seconds = timestamp / 1000000000UL;
         uint64_t nanoseconds = timestamp % 1000000000UL;
         return ros::Time(seconds, nanoseconds);
+    }
+
+    std::string Camera::ipToString(uint32_t raw_ip)
+    {
+        std::ostringstream stream;
+        stream << ((raw_ip >> 24) & 0xFF) << "."
+               << ((raw_ip >> 16) & 0xFF) << "."
+               << ((raw_ip >> 8) & 0xFF) << "."
+               << (raw_ip & 0xFF);
+        return stream.str();
+    }
+
+    bool Camera::ipMatches(const std::string &configured_ip, uint32_t device_raw_ip)
+    {
+        std::string big_endian = ipToString(device_raw_ip);
+        uint32_t byte_swapped = ((device_raw_ip & 0x000000FFU) << 24) |
+                                ((device_raw_ip & 0x0000FF00U) << 8)  |
+                                ((device_raw_ip & 0x00FF0000U) >> 8)  |
+                                ((device_raw_ip & 0xFF000000U) >> 24);
+        std::string little_endian = ipToString(byte_swapped);
+        return configured_ip == big_endian || configured_ip == little_endian;
+    }
+
+    int Camera::findDeviceIndexByIp(const std::string &configured_ip, std::vector<bool> &used_devices)
+    {
+        for (int i = 0; i < static_cast<int>(stDeviceList.nDeviceNum); ++i)
+        {
+            if (used_devices[i])
+            {
+                continue;
+            }
+
+            MV_CC_DEVICE_INFO *device_info = stDeviceList.pDeviceInfo[i];
+            if (device_info == NULL)
+            {
+                continue;
+            }
+
+            if (device_info->nTLayerType != MV_GIGE_DEVICE)
+            {
+                ROS_ERROR("Device index %d is not a GigE camera. IP-only matching is enabled.", i);
+                continue;
+            }
+
+            uint32_t device_ip_raw = device_info->SpecialInfo.stGigEInfo.nCurrentIp;
+            if (ipMatches(configured_ip, device_ip_raw))
+            {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    std::string Camera::triggerSourceToString(unsigned int trigger_source)
+    {
+        switch (trigger_source)
+        {
+            case 0:
+                return "LINE0";
+            case 1:
+                return "LINE1";
+            case 2:
+                return "LINE2";
+            case 3:
+                return "LINE3";
+            case 4:
+                return "COUNTER0";
+            case 7:
+                return "SOFTWARE";
+            case 8:
+                return "FREQUENCY_CONVERTER";
+            default:
+                return "UNKNOWN";
+        }
+    }
+
+    void Camera::logCurrentConfig(int logical_index, int physical_device_index, const std::string &yaml_camera_name, void* handle)
+    {
+        MVCC_INTVALUE width = {0};
+        MVCC_INTVALUE height = {0};
+        MVCC_INTVALUE payload = {0};
+        MVCC_ENUMVALUE trigger_mode = {0};
+        MVCC_ENUMVALUE trigger_source = {0};
+        MVCC_FLOATVALUE frame_rate = {0};
+
+        int ret_width = MV_CC_GetIntValue(handle, "Width", &width);
+        int ret_height = MV_CC_GetIntValue(handle, "Height", &height);
+        int ret_payload = MV_CC_GetIntValue(handle, "PayloadSize", &payload);
+        int ret_trigger_mode = MV_CC_GetEnumValue(handle, "TriggerMode", &trigger_mode);
+        int ret_trigger_source = MV_CC_GetEnumValue(handle, "TriggerSource", &trigger_source);
+
+        int ret_frame_rate = MV_CC_GetFloatValue(handle, "ResultingFrameRate", &frame_rate);
+        if (ret_frame_rate != MV_OK)
+        {
+            ret_frame_rate = MV_CC_GetFloatValue(handle, "AcquisitionFrameRate", &frame_rate);
+        }
+
+        std::string configured_ip = "N/A";
+        if (logical_index >= 0 && logical_index < static_cast<int>(configured_camera_ips.size()) && !configured_camera_ips[logical_index].empty())
+        {
+            configured_ip = configured_camera_ips[logical_index];
+        }
+
+        std::string device_ip = "N/A";
+        if (physical_device_index >= 0 && physical_device_index < static_cast<int>(stDeviceList.nDeviceNum))
+        {
+            MV_CC_DEVICE_INFO *device_info = stDeviceList.pDeviceInfo[physical_device_index];
+            if (device_info != NULL && device_info->nTLayerType == MV_GIGE_DEVICE)
+            {
+                device_ip = ipToString(device_info->SpecialInfo.stGigEInfo.nCurrentIp);
+            }
+        }
+
+        std::ostringstream report;
+        report << "========== Camera Runtime Config ==========" << "\n"
+               << "logical_index: " << logical_index << "\n"
+               << "physical_device_index: " << physical_device_index << "\n"
+             << "yaml_camera_name: " << yaml_camera_name << "\n"
+               << "configured_ip: " << configured_ip << "\n"
+               << "device_ip: " << device_ip << "\n"
+                             << "timestamp_mode: " << (SystemTime ? "system_time" : "device_time") << "\n";
+
+        if (ret_width == MV_OK && ret_height == MV_OK)
+        {
+            report << "resolution: " << width.nCurValue << "x" << height.nCurValue << "\n";
+        }
+        else
+        {
+            report << "resolution: unavailable" << "\n";
+        }
+
+        if (ret_frame_rate == MV_OK)
+        {
+            report << std::fixed << std::setprecision(2)
+                   << "frame_rate_fps: " << frame_rate.fCurValue << "\n";
+        }
+        else
+        {
+            report << "frame_rate_fps: unavailable" << "\n";
+        }
+
+        if (ret_payload == MV_OK)
+        {
+            report << "payload_size_bytes: " << payload.nCurValue << "\n";
+        }
+        else
+        {
+            report << "payload_size_bytes: unavailable" << "\n";
+        }
+
+        if (ret_trigger_mode == MV_OK)
+        {
+            bool trigger_on = (trigger_mode.nCurValue != 0U);
+            report << "trigger_mode: " << (trigger_on ? "on" : "off")
+                   << " (" << trigger_mode.nCurValue << ")" << "\n";
+        }
+        else
+        {
+            report << "trigger_mode: unavailable" << "\n";
+        }
+
+        if (ret_trigger_source == MV_OK)
+        {
+            report << "trigger_source: " << triggerSourceToString(trigger_source.nCurValue)
+                   << " (" << trigger_source.nCurValue << ")" << "\n";
+        }
+        else
+        {
+            report << "trigger_source: unavailable" << "\n";
+        }
+
+        report << "yaml_trigger_mode_param: " << TriggerMode << "\n"
+               << "yaml_trigger_source_param: " << TriggerSource << "\n"
+               << "===========================================";
+
+        ROS_INFO_STREAM(report.str());
     }
 
     // Load camera info from ROS parameters
@@ -444,11 +784,10 @@ namespace camera
         
         // Load basic camera info
         int width, height;
-        std::string camera_name_str, distortion_model;
+        std::string distortion_model;
         
         if (!node.getParam(param_prefix + "image_width", width) ||
             !node.getParam(param_prefix + "image_height", height) ||
-            !node.getParam(param_prefix + "camera_name", camera_name_str) ||
             !node.getParam(param_prefix + "distortion_model", distortion_model))
         {
             ROS_ERROR("Failed to load basic camera info for %s", camera_name.c_str());
@@ -523,6 +862,7 @@ namespace camera
         // Check if essential parameters exist
         if (node.hasParam(param_prefix + "image_width") &&
             node.hasParam(param_prefix + "image_height") &&
+            node.hasParam(param_prefix + "ip") &&
             node.hasParam(param_prefix + "camera_matrix/data") &&
             node.hasParam(param_prefix + "distortion_coefficients/data") &&
             node.hasParam(param_prefix + "rectification_matrix/data") &&
@@ -534,6 +874,65 @@ namespace camera
         return false;
     }
 
+    std::vector<std::string> Camera::discoverCameraNames(ros::NodeHandle &node)
+    {
+        std::vector<std::string> param_names;
+        ros::param::getParamNames(param_names);
+
+        std::set<std::string> camera_name_set;
+        std::string namespace_prefix = node.getNamespace();
+        if (namespace_prefix.empty())
+        {
+            namespace_prefix = "/";
+        }
+
+        if (namespace_prefix.back() != '/')
+        {
+            namespace_prefix += "/";
+        }
+
+        for (size_t i = 0; i < param_names.size(); ++i)
+        {
+            const std::string &full_name = param_names[i];
+
+            if (full_name.find(namespace_prefix) != 0)
+            {
+                continue;
+            }
+
+            std::string relative = full_name.substr(namespace_prefix.size());
+            if (relative.empty())
+            {
+                continue;
+            }
+
+            size_t slash_pos = relative.find('/');
+            if (slash_pos == std::string::npos)
+            {
+                continue;
+            }
+
+            std::string camera_name = relative.substr(0, slash_pos);
+            if (camera_name.empty())
+            {
+                continue;
+            }
+
+            if (checkCameraParamsExist(node, camera_name))
+            {
+                camera_name_set.insert(camera_name);
+            }
+        }
+
+        std::vector<std::string> camera_names(camera_name_set.begin(), camera_name_set.end());
+        ROS_INFO("Discovered %zu camera config(s) from YAML", camera_names.size());
+        for (size_t i = 0; i < camera_names.size(); ++i)
+        {
+            ROS_INFO("  camera[%zu]: %s", i, camera_names[i].c_str());
+        }
+        return camera_names;
+    }
+
     Camera::~Camera()
     {
         // 销毁线程
@@ -542,7 +941,7 @@ namespace camera
             pthread_join(threads[i], NULL);
         }
 
-        for (int i = 0; i < stDeviceList.nDeviceNum; i++)
+        for (int i = 0; i < static_cast<int>(handles.size()); i++)
         {
             // 停止取流
             nRet = MV_CC_StopGrabbing(handles[i]);

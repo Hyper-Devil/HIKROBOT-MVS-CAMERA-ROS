@@ -6,8 +6,9 @@ camera_left:
   image_width: 2048
   image_height: 1536
   
-  # Camera name
-  camera_name: "left_camera"
+  # Camera IP (required for strict IP matching)
+  # Example: "192.168.1.10"
+  ip: "192.168.1.10"
   
   # Camera matrix (3x3) - from XML M1 matrix
   # [fx,  0, cx]
@@ -53,8 +54,9 @@ camera_right:
   image_width: 2048
   image_height: 1536
   
-  # Camera name
-  camera_name: "right_camera"
+  # Camera IP (required for strict IP matching)
+  # Example: "192.168.1.11"
+  ip: "192.168.1.11"
   
   # Camera matrix (3x3) - from XML M2 matrix
   camera_matrix:

@@ -1,4 +1,4 @@
 TriggerMode: 0 # 0为不启用触发，1为启用
 TriggerSource: 0
-FrameRate: 15.0   # 帧率
+FrameRate: 20.0   # 帧率
 SystemTime: false # 是否使用上位机时间

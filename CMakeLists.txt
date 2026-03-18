@@ -11,10 +11,12 @@ find_package(catkin REQUIRED COMPONENTS
   cv_bridge
   image_transport
   camera_info_manager
+  nodelet
+  pluginlib
 )
 
 catkin_package(
- 
+  
 )
 
 find_package(OpenCV REQUIRED)

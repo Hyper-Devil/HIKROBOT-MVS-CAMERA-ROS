@@ -35,7 +35,7 @@ namespace camera
 
     std::vector<cv_bridge::CvImagePtr> cv_ptrs;
 
-    ros::Time ConvertToROSTime(uint32_t nDevTimeStampHigh, uint32_t nDevTimeStampLow);
+    ros::Time ConvertToROSTime(uint32_t nDevTimeStampHigh, uint32_t nDevTimeStampLow, int64_t freq);
 
     static bool setEnumWithVerify(void* handle,
                                   const char* key,
@@ -49,6 +49,7 @@ namespace camera
         MVCC_INTVALUE stParam;
         bool trigger_enabled;
         int trigger_source;
+        int64_t nTimestampFreq;
     };
 
     class Camera
@@ -176,6 +177,10 @@ namespace camera
             ROS_ERROR("No valid camera parameters found in ROS parameter server!");
             exit(-1);
         }
+
+        // Expose discovered camera keys for downstream dynamic nodelet loading.
+        ros::param::set("/hikrobot_camera/active_camera_names", discovered_camera_names);
+        ros::param::set("/hikrobot_camera/active_camera_names_ready", true);
 
         int configured_camera_count = static_cast<int>(discovered_camera_names.size());
 
@@ -405,6 +410,20 @@ namespace camera
         }
         logCurrentConfig(logical_index, physical_device_index, yaml_camera_name, handle);
 
+        // 获取时间戳频率 (GevTimestampTickFrequency)
+        MVCC_INTVALUE stTickFreq = {0};
+        nRet = MV_CC_GetIntValue(handle, "GevTimestampTickFrequency", &stTickFreq);
+        int64_t current_freq = 100000000; // 默认 100MHz (10ns)
+        if (nRet == MV_OK && stTickFreq.nCurValue > 0)
+        {
+            current_freq = stTickFreq.nCurValue;
+            ROS_INFO("Camera [%d] Timestamp Tick Frequency: %ld Hz", logical_index, current_freq);
+        }
+        else
+        {
+            ROS_WARN("Failed to get Tick Frequency, using default 100MHz");
+        }
+
         // 创建工作线程
         ThreadData* data = new ThreadData;
         data->ndevice = logical_index;
@@ -412,6 +431,7 @@ namespace camera
         data->stParam = stParam;
         data->trigger_enabled = (TriggerMode != 0);
         data->trigger_source = TriggerSource;
+        data->nTimestampFreq = current_freq;
 
         pthread_t nThreadID;
         threads.push_back(nThreadID);
@@ -543,7 +563,9 @@ namespace camera
                 }
                 else
                 {
-                    image_msgs[ndevice].header.stamp = ConvertToROSTime(stImageInfo.nDevTimeStampHigh, stImageInfo.nDevTimeStampLow);
+                    image_msgs[ndevice].header.stamp = ConvertToROSTime(stImageInfo.nDevTimeStampHigh, 
+                                                                            stImageInfo.nDevTimeStampLow, 
+                                                                            data->nTimestampFreq);
                 }
 
                 image_msgs[ndevice].header.frame_id = camera_name;
@@ -591,14 +613,16 @@ namespace camera
         return true;
     }
 
-    ros::Time ConvertToROSTime(uint32_t nDevTimeStampHigh, uint32_t nDevTimeStampLow)
+    ros::Time ConvertToROSTime(uint32_t nDevTimeStampHigh, uint32_t nDevTimeStampLow, int64_t freq)
     {
-        uint64_t timestamp = static_cast<uint64_t>(nDevTimeStampHigh) << 32 | nDevTimeStampLow;
-        // 设备的系统时间戳是以10ns为单位（通常频率为100MHz，即每秒10^8 ticks）
-        timestamp *= 10; 
-        uint64_t seconds = timestamp / 1000000000UL;
-        uint64_t nanoseconds = timestamp % 1000000000UL;
-        return ros::Time(seconds, nanoseconds);
+        uint64_t ticks = (static_cast<uint64_t>(nDevTimeStampHigh) << 32) | nDevTimeStampLow;
+        
+        // 秒 = 总 ticks / 每秒 ticks 数
+        uint64_t seconds = ticks / freq;
+        // 剩余 ticks 转换为纳秒：(剩余 ticks * 1e9) / freq
+        uint64_t nanoseconds = ((ticks % freq) * 1000000000UL) / freq;
+        
+        return ros::Time(static_cast<uint32_t>(seconds), static_cast<uint32_t>(nanoseconds));
     }
 
     std::string Camera::ipToString(uint32_t raw_ip)
@@ -849,6 +873,59 @@ namespace camera
         else
         {
             ROS_ERROR("Failed to load projection matrix for %s", camera_name.c_str());
+        }
+
+        // Load optional binning and ROI fields for CameraInfo publishing.
+        int binning_x = 0;
+        int binning_y = 0;
+        if (node.getParam(param_prefix + "binning_x", binning_x))
+        {
+            camera_info.binning_x = static_cast<uint32_t>(std::max(0, binning_x));
+        }
+        else
+        {
+            camera_info.binning_x = 0;
+            ROS_WARN("%sbinning_x not found, using default 0", param_prefix.c_str());
+        }
+
+        if (node.getParam(param_prefix + "binning_y", binning_y))
+        {
+            camera_info.binning_y = static_cast<uint32_t>(std::max(0, binning_y));
+        }
+        else
+        {
+            camera_info.binning_y = 0;
+            ROS_WARN("%sbinning_y not found, using default 0", param_prefix.c_str());
+        }
+
+        int roi_x_offset = 0;
+        int roi_y_offset = 0;
+        int roi_height = 0;
+        int roi_width = 0;
+        bool roi_do_rectify = false;
+
+        bool has_roi_x = node.getParam(param_prefix + "roi/x_offset", roi_x_offset);
+        bool has_roi_y = node.getParam(param_prefix + "roi/y_offset", roi_y_offset);
+        bool has_roi_h = node.getParam(param_prefix + "roi/height", roi_height);
+        bool has_roi_w = node.getParam(param_prefix + "roi/width", roi_width);
+        bool has_roi_rectify = node.getParam(param_prefix + "roi/do_rectify", roi_do_rectify);
+
+        if (has_roi_x && has_roi_y && has_roi_h && has_roi_w)
+        {
+            camera_info.roi.x_offset = static_cast<uint32_t>(std::max(0, roi_x_offset));
+            camera_info.roi.y_offset = static_cast<uint32_t>(std::max(0, roi_y_offset));
+            camera_info.roi.height = static_cast<uint32_t>(std::max(0, roi_height));
+            camera_info.roi.width = static_cast<uint32_t>(std::max(0, roi_width));
+            camera_info.roi.do_rectify = has_roi_rectify ? roi_do_rectify : false;
+        }
+        else
+        {
+            camera_info.roi.x_offset = 0;
+            camera_info.roi.y_offset = 0;
+            camera_info.roi.height = 0;
+            camera_info.roi.width = 0;
+            camera_info.roi.do_rectify = false;
+            ROS_WARN("%sroi not fully configured, using default ROI (all zeros)", param_prefix.c_str());
         }
 
         ROS_INFO("Successfully loaded camera info for %s", camera_name.c_str());

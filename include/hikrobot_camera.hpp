@@ -30,12 +30,28 @@ namespace camera
     std::vector<std::string> configured_camera_ips;
 
     std::vector<image_transport::CameraPublisher> image_pubs;
+    std::vector<image_transport::CameraPublisher> rect_image_pubs;
     std::vector<sensor_msgs::Image> image_msgs;
     std::vector<sensor_msgs::CameraInfo> camera_info_msgs;
+    std::vector<sensor_msgs::CameraInfo> rect_camera_info_msgs;
+
+    std::vector<cv::Mat> rect_map_xs;
+    std::vector<cv::Mat> rect_map_ys;
+    std::vector<cv::Rect> rect_crop_rois;
+    std::vector<bool> rect_enabled_flags;
+
+    int publish_queue_size = 10;
 
     std::vector<cv_bridge::CvImagePtr> cv_ptrs;
 
     ros::Time ConvertToROSTime(uint32_t nDevTimeStampHigh, uint32_t nDevTimeStampLow, int64_t freq);
+
+    bool buildRectifyArtifacts(const sensor_msgs::CameraInfo &raw_info,
+                               cv::Size image_size,
+                               cv::Mat &map_x,
+                               cv::Mat &map_y,
+                               cv::Rect &crop_roi,
+                               sensor_msgs::CameraInfo &rect_info);
 
     static bool setEnumWithVerify(void* handle,
                                   const char* key,
@@ -169,6 +185,7 @@ namespace camera
         node.param("TriggerSource", TriggerSource, 0);  //设置触发模式
         node.param("FrameRate", FrameRate, 10.0);       //无触发时的帧率
         node.param("SystemTime", SystemTime, false);
+        node.param("publish_queue_size", publish_queue_size, 10);
 
         ROS_INFO("Loading camera info from ROS parameters...");
         std::vector<std::string> discovered_camera_names = discoverCameraNames(node);
@@ -230,8 +247,14 @@ namespace camera
             camera_yaml_names.resize(active_device_count);
             configured_camera_ips.resize(active_device_count);
             image_pubs.resize(active_device_count);
+            rect_image_pubs.resize(active_device_count);
             image_msgs.resize(active_device_count);
             camera_info_msgs.resize(active_device_count);
+            rect_camera_info_msgs.resize(active_device_count);
+            rect_map_xs.resize(active_device_count);
+            rect_map_ys.resize(active_device_count);
+            rect_crop_rois.resize(active_device_count);
+            rect_enabled_flags.resize(active_device_count, false);
             cv_ptrs.resize(active_device_count);
 
             for (int i = 0; i < active_device_count; i++)
@@ -268,12 +291,32 @@ namespace camera
             {
                 const std::string &camera_name = camera_yaml_names[i];
                 std::string topic = "/hikrobot_camera/" + camera_name + "/image_raw";
-                image_pubs[i] = main_cam_image.advertiseCamera(topic, 1000);
+                std::string rect_topic = "/hikrobot_camera/" + camera_name + "/rect/image_rect";
+                image_pubs[i] = main_cam_image.advertiseCamera(topic, publish_queue_size);
+                rect_image_pubs[i] = main_cam_image.advertiseCamera(rect_topic, publish_queue_size);
 
                 cv_ptrs[i] = boost::make_shared<cv_bridge::CvImage>();
                 cv_ptrs[i]->encoding = sensor_msgs::image_encodings::RGB8;
 
                 loadCameraInfoFromParams(node, camera_name, camera_info_msgs[i]);
+
+                const sensor_msgs::CameraInfo &camera_info = camera_info_msgs[i];
+                cv::Size image_size(static_cast<int>(camera_info.width), static_cast<int>(camera_info.height));
+                rect_enabled_flags[i] = buildRectifyArtifacts(camera_info,
+                                                              image_size,
+                                                              rect_map_xs[i],
+                                                              rect_map_ys[i],
+                                                              rect_crop_rois[i],
+                                                              rect_camera_info_msgs[i]);
+
+                if (rect_enabled_flags[i])
+                {
+                    ROS_INFO("Rectify enabled for %s, rect topic: %s", camera_name.c_str(), rect_topic.c_str());
+                }
+                else
+                {
+                    ROS_INFO("Rectify disabled for %s (roi/do_rectify=false or invalid roi)", camera_name.c_str());
+                }
 
                 ROS_INFO("Initialized publisher for %s on topic %s", camera_name.c_str(), topic.c_str());
             }
@@ -573,6 +616,37 @@ namespace camera
                 camera_info_msgs[ndevice].header.frame_id = camera_name;
 
                 image_pubs[ndevice].publish(image_msgs[ndevice], camera_info_msgs[ndevice]);
+
+                if (ndevice < static_cast<int>(rect_enabled_flags.size()) &&
+                    rect_enabled_flags[ndevice] &&
+                    ndevice < static_cast<int>(rect_map_xs.size()) &&
+                    ndevice < static_cast<int>(rect_map_ys.size()) &&
+                    ndevice < static_cast<int>(rect_crop_rois.size()) &&
+                    ndevice < static_cast<int>(rect_camera_info_msgs.size()) &&
+                    ndevice < static_cast<int>(rect_image_pubs.size()))
+                {
+                    cv::Mat rectified_full;
+                    cv::remap(cv_ptrs[ndevice]->image,
+                              rectified_full,
+                              rect_map_xs[ndevice],
+                              rect_map_ys[ndevice],
+                              cv::INTER_LINEAR);
+
+                    const cv::Rect &crop_roi = rect_crop_rois[ndevice];
+                    if (crop_roi.width > 0 && crop_roi.height > 0 &&
+                        crop_roi.x >= 0 && crop_roi.y >= 0 &&
+                        crop_roi.x + crop_roi.width <= rectified_full.cols &&
+                        crop_roi.y + crop_roi.height <= rectified_full.rows)
+                    {
+                        cv::Mat rect_cropped = rectified_full(crop_roi);
+                        sensor_msgs::Image rect_image_msg = *(cv_bridge::CvImage(image_msgs[ndevice].header,
+                                                                                 sensor_msgs::image_encodings::RGB8,
+                                                                                 rect_cropped).toImageMsg());
+
+                        rect_camera_info_msgs[ndevice].header = image_msgs[ndevice].header;
+                        rect_image_pubs[ndevice].publish(rect_image_msg, rect_camera_info_msgs[ndevice]);
+                    }
+                }
             }
             else
             {
@@ -697,6 +771,136 @@ namespace camera
             default:
                 return "UNKNOWN";
         }
+    }
+
+    bool buildRectifyArtifacts(const sensor_msgs::CameraInfo &raw_info,
+                               cv::Size image_size,
+                               cv::Mat &map_x,
+                               cv::Mat &map_y,
+                               cv::Rect &crop_roi,
+                               sensor_msgs::CameraInfo &rect_info)
+    {
+        if (!raw_info.roi.do_rectify)
+        {
+            return false;
+        }
+
+        if (image_size.width <= 0 || image_size.height <= 0)
+        {
+            return false;
+        }
+
+        cv::Mat K(3, 3, CV_64F);
+        cv::Mat R(3, 3, CV_64F);
+        cv::Mat P3x3(3, 3, CV_64F);
+        for (int r = 0; r < 3; ++r)
+        {
+            for (int c = 0; c < 3; ++c)
+            {
+                K.at<double>(r, c) = raw_info.K[r * 3 + c];
+                R.at<double>(r, c) = raw_info.R[r * 3 + c];
+                P3x3.at<double>(r, c) = raw_info.P[r * 4 + c];
+            }
+        }
+
+        bool p3x3_valid = (P3x3.at<double>(0, 0) != 0.0 && P3x3.at<double>(1, 1) != 0.0);
+        if (!p3x3_valid)
+        {
+            P3x3 = K.clone();
+        }
+
+        cv::Mat D(raw_info.D.size(), 1, CV_64F);
+        for (size_t i = 0; i < raw_info.D.size(); ++i)
+        {
+            D.at<double>(static_cast<int>(i), 0) = raw_info.D[i];
+        }
+
+        cv::initUndistortRectifyMap(K, D, R, P3x3, image_size, CV_32FC1, map_x, map_y);
+
+        int binning_x = static_cast<int>(raw_info.binning_x);
+        int binning_y = static_cast<int>(raw_info.binning_y);
+        if (binning_x <= 0)
+        {
+            binning_x = 1;
+        }
+        if (binning_y <= 0)
+        {
+            binning_y = 1;
+        }
+
+        int crop_x = static_cast<int>(raw_info.roi.x_offset / static_cast<uint32_t>(binning_x));
+        int crop_y = static_cast<int>(raw_info.roi.y_offset / static_cast<uint32_t>(binning_y));
+        int crop_w = static_cast<int>(raw_info.roi.width / static_cast<uint32_t>(binning_x));
+        int crop_h = static_cast<int>(raw_info.roi.height / static_cast<uint32_t>(binning_y));
+
+        if (crop_w <= 0 || crop_h <= 0)
+        {
+            return false;
+        }
+
+        crop_x = std::max(0, crop_x);
+        crop_y = std::max(0, crop_y);
+        if (crop_x >= image_size.width || crop_y >= image_size.height)
+        {
+            return false;
+        }
+
+        if (crop_x + crop_w > image_size.width)
+        {
+            crop_w = image_size.width - crop_x;
+        }
+        if (crop_y + crop_h > image_size.height)
+        {
+            crop_h = image_size.height - crop_y;
+        }
+
+        if (crop_w <= 0 || crop_h <= 0)
+        {
+            return false;
+        }
+
+        crop_roi = cv::Rect(crop_x, crop_y, crop_w, crop_h);
+
+        rect_info = raw_info;
+        rect_info.width = static_cast<uint32_t>(crop_w);
+        rect_info.height = static_cast<uint32_t>(crop_h);
+
+        for (size_t i = 0; i < rect_info.D.size(); ++i)
+        {
+            rect_info.D[i] = 0.0;
+        }
+
+        rect_info.R = {1.0, 0.0, 0.0,
+                       0.0, 1.0, 0.0,
+                       0.0, 0.0, 1.0};
+
+        rect_info.K[0] = P3x3.at<double>(0, 0);
+        rect_info.K[1] = P3x3.at<double>(0, 1);
+        rect_info.K[2] = P3x3.at<double>(0, 2) - static_cast<double>(crop_x);
+        rect_info.K[3] = 0.0;
+        rect_info.K[4] = P3x3.at<double>(1, 1);
+        rect_info.K[5] = P3x3.at<double>(1, 2) - static_cast<double>(crop_y);
+        rect_info.K[6] = 0.0;
+        rect_info.K[7] = 0.0;
+        rect_info.K[8] = 1.0;
+
+        rect_info.P[0] = P3x3.at<double>(0, 0);
+        rect_info.P[1] = P3x3.at<double>(0, 1);
+        rect_info.P[2] = P3x3.at<double>(0, 2) - static_cast<double>(crop_x);
+        rect_info.P[4] = 0.0;
+        rect_info.P[5] = P3x3.at<double>(1, 1);
+        rect_info.P[6] = P3x3.at<double>(1, 2) - static_cast<double>(crop_y);
+        rect_info.P[8] = 0.0;
+        rect_info.P[9] = 0.0;
+        rect_info.P[10] = 1.0;
+
+        rect_info.roi.x_offset = 0;
+        rect_info.roi.y_offset = 0;
+        rect_info.roi.width = 0;
+        rect_info.roi.height = 0;
+        rect_info.roi.do_rectify = false;
+
+        return true;
     }
 
     void Camera::logCurrentConfig(int logical_index, int physical_device_index, const std::string &yaml_camera_name, void* handle)

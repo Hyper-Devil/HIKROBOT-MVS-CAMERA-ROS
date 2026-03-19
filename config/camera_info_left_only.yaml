@@ -54,7 +54,7 @@ camera_left:
     y_offset: 192
     height: 1152
     width: 1536
-    do_rectify: false
+    do_rectify: true
   
   # Distortion model
   distortion_model: "plumb_bob"

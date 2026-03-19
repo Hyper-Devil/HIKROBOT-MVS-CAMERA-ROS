@@ -7,7 +7,13 @@
     
     <!-- Camera node -->
     <node pkg="hikrobot_camera" type="hikrobot_camera" name="hikrobot_camera" respawn="true" output="screen">
+        <param name="publish_queue_size" type="int" value="10"/>
         <rosparam param="camera_left/image_raw/disable_pub_plugins">
+            - 'image_transport/compressed'
+            - 'image_transport/theora'
+            - 'image_transport/compressedDepth'
+        </rosparam>
+        <rosparam param="camera_left/rect/image_rect/disable_pub_plugins">
             - 'image_transport/compressed'
             - 'image_transport/theora'
             - 'image_transport/compressedDepth'

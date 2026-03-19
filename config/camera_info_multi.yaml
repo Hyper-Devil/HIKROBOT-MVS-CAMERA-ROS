@@ -45,6 +45,16 @@ camera_left:
     data: [1226.826244235890499, 0.054599369308207, 1035.765542636815780, 0.0,
            0.000000000000000, 1226.784934786660187, 735.264798789340603, 0.0,
            0.000000000000000, 0.000000000000000, 1.000000000000000, 0.0]
+
+  # Optional CameraInfo fields for rectified output
+  binning_x: 1
+  binning_y: 1
+  roi:
+    x_offset: 0
+    y_offset: 0
+    height: 1536
+    width: 2048
+    do_rectify: true
   
   # Distortion model
   distortion_model: "plumb_bob"
@@ -88,6 +98,16 @@ camera_right:
     data: [1224.955194360940823, -0.350672492310975, 1015.253462174664151, -523734.4,
            0.000000000000000, 1225.470558979229054, 786.007140767218289, -1.056,
            0.000000000000000, 0.000000000000000, 1.000000000000000, 0.0]
+
+  # Optional CameraInfo fields for rectified output
+  binning_x: 1
+  binning_y: 1
+  roi:
+    x_offset: 0
+    y_offset: 0
+    height: 1536
+    width: 2048
+    do_rectify: true
   
   # Distortion model
   distortion_model: "plumb_bob"

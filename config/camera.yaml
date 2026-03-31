@@ -1,4 +1,5 @@
-TriggerMode: 0 # 0为不启用触发，1为启用
+TriggerMode: 1 # 0为不启用触发，1为启用
 TriggerSource: 0
-FrameRate: 20.0   # 帧率
+FrameRate: 10.0   # 帧率
+FrameTimeoutMs: 60 # 取帧超时，20Hz外触发建议>=50
 SystemTime: false # 是否使用上位机时间

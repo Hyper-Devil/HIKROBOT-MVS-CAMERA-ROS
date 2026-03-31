@@ -65,6 +65,7 @@ namespace camera
         MVCC_INTVALUE stParam;
         bool trigger_enabled;
         int trigger_source;
+        int frame_timeout_ms;
         int64_t nTimestampFreq;
     };
 
@@ -87,6 +88,7 @@ namespace camera
         int TriggerMode;
         int TriggerSource;
         double FrameRate;
+        int FrameTimeoutMs;
         // 触发来源：
         // MV_TRIGGER_SOURCE_LINE0 = 0,MV_TRIGGER_SOURCE_LINE1 = 1,MV_TRIGGER_SOURCE_LINE2 = 2,
         // MV_TRIGGER_SOURCE_LINE3 = 3,MV_TRIGGER_SOURCE_COUNTER0 = 4,MV_TRIGGER_SOURCE_SOFTWARE = 7,
@@ -184,6 +186,7 @@ namespace camera
         node.param("TriggerMode", TriggerMode, 0);    //0为不启用触发，1为启用
         node.param("TriggerSource", TriggerSource, 0);  //设置触发模式
         node.param("FrameRate", FrameRate, 10.0);       //无触发时的帧率
+        node.param("FrameTimeoutMs", FrameTimeoutMs, 60); // GetOneFrame超时，20Hz触发建议>=50ms
         node.param("SystemTime", SystemTime, false);
         node.param("publish_queue_size", publish_queue_size, 10);
 
@@ -474,6 +477,7 @@ namespace camera
         data->stParam = stParam;
         data->trigger_enabled = (TriggerMode != 0);
         data->trigger_source = TriggerSource;
+        data->frame_timeout_ms = FrameTimeoutMs;
         data->nTimestampFreq = current_freq;
 
         pthread_t nThreadID;
@@ -501,6 +505,7 @@ namespace camera
         MVCC_INTVALUE stParam = data->stParam;
         bool trigger_enabled = data->trigger_enabled;
         int trigger_source = data->trigger_source;
+        int frame_timeout_ms = data->frame_timeout_ms;
 
         unsigned char * pData = NULL; 
         MV_FRAME_OUT_INFO_EX stImageInfo = {0};
@@ -517,16 +522,17 @@ namespace camera
 
         while (ros::ok())
         {
-            nRet = MV_CC_GetOneFrameTimeout(handle, pData, nDataSize, &stImageInfo, 15);
+            nRet = MV_CC_GetOneFrameTimeout(handle, pData, nDataSize, &stImageInfo, static_cast<unsigned int>(frame_timeout_ms));
             if (nRet != MV_OK)
             {
                 if (trigger_enabled && nRet == MV_E_NODATA)
                 {
                     ++image_empty_count;
                     ROS_WARN_THROTTLE(5.0,
-                                      "Device %d in trigger mode (source=%d), waiting for trigger signal. Consecutive empty reads: %d",
+                                      "Device %d in trigger mode (source=%d), waiting for trigger signal. timeout=%dms, consecutive empty reads=%d",
                                       ndevice,
                                       trigger_source,
+                                      frame_timeout_ms,
                                       image_empty_count);
                     continue;
                 }

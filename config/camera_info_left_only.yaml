@@ -7,8 +7,8 @@ camera_left:
   image_height: 1536
   
   # Camera IP (required for strict IP matching)
-  # Example: "192.168.1.103"
-  ip: "192.168.1.103"
+  # Example: "192.168.2.103"
+  ip: "192.168.2.103"
   
   # Camera matrix (3x3) - from XML M1 matrix
   # [fx,  0, cx]

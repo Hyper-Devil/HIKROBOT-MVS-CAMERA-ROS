@@ -1,0 +1,44 @@
+<launch>
+    <!--
+        Offline rectifier for HIKROBOT camera bags.
+
+        Automatically discovers /hikrobot_camera/*/image_raw + camera_info
+        topic pairs and publishes /hikrobot_camera/*/rect/image_rect +
+        rect/camera_info, replicating the exact online rectification process.
+
+        Usage A — bag started separately:
+            rosbag play your_recording.bag
+            roslaunch hikrobot_camera rect_from_bag.launch
+
+        Usage B — bag started from this launch file:
+            roslaunch hikrobot_camera rect_from_bag.launch \
+                bag:=/path/to/your_recording.bag
+
+        Optional arguments:
+            bag          Path to bag file (empty = do not start bag internally).
+            bag_args     Extra args forwarded to rosbag play, e.g. "--clock -r 0.5".
+            topic_prefix Only pairs whose topics start with this prefix are processed.
+            scan_timeout Seconds to wait for topics before giving up (default 10).
+            queue_size   ROS subscriber/publisher queue depth (default 10).
+    -->
+    <arg name="bag"          default=""               doc="Path to bag file; leave empty to play bag externally."/>
+    <arg name="bag_args"     default=""               doc="Extra args for rosbag play (e.g. --clock -r 0.5)."/>
+    <arg name="topic_prefix" default="/hikrobot_camera" doc="Only topic pairs under this prefix are processed."/>
+    <arg name="scan_timeout" default="10.0"           doc="Seconds to wait for topics to appear."/>
+    <arg name="queue_size"   default="10"             doc="Subscriber/publisher queue size."/>
+
+    <!-- Optional internal bag playback -->
+    <group if="$(eval bag != '')">
+        <node pkg="rosbag" type="play" name="rosbag_play"
+              args="$(arg bag) $(arg bag_args)"
+              output="screen" required="true"/>
+    </group>
+
+    <!-- Rectifier node -->
+    <node pkg="hikrobot_camera" type="rect_from_bag" name="hikrobot_rect_from_bag"
+          output="screen">
+        <param name="topic_prefix" value="$(arg topic_prefix)"/>
+        <param name="scan_timeout" value="$(arg scan_timeout)"/>
+        <param name="queue_size"   value="$(arg queue_size)"/>
+    </node>
+</launch>
